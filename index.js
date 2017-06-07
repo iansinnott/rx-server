@@ -1,3 +1,8 @@
+const http = require('http');
+const { Observable, Subject } = require('rxjs');
+const debug = require('debug')('rx-server');
+const uuid = require('uuid');
+
 // - Create a req stream and a res stream.
 // - The user only interacts with the res stream
 // - Behind the scenes we zip the two stream so that we always have access to the
@@ -14,24 +19,35 @@
 
 const createApp = (epic) => {
   const reqSubject = new Subject();
-  const resSubject = new Subject();
+  const responseMap = new Map();
+
   const responseObservable = epic(reqSubject);
 
-  Observable.zip(reqSubject, resSubject)
-    // TODO: a mergeMap here could be used to add middleware
-    .mergeMap(([req, res]) => {
-      return responseObservable
-        .map((response) => ({ response, _res: res }))
+  reqSubject
+    .mergeMap(req => {
+      debug('merge mapping')
+      return responseObservable.map(x => Object.assign({}, x, { __resId: req.__resId })) // Tack on the res id
     })
-    .subscribe(({ response, _res }) => {
-      _res.writeHead(response.status, response.headers);
-      _res.write(response.body);
-      _res.end();
-    })
+    .subscribe(
+      (response) => {
+          debug('get subscribed result', response)
+          const res = responseMap.get(response.__resId);
+          responseMap.delete(response.__resId);
+
+          res.writeHead(response.status, response.headers);
+          res.write(response.body);
+          res.end();
+      },
+      err => debug('FUCK', err),
+      () => debug('DONE')
+    );
 
   return (req, res) => {
+    const resId = uuid();
+    responseMap.set(resId, res);
+    req.__resId = resId;
+    debug(`Receiving ${req.method} ${req.url}`)
     reqSubject.next(req);
-    resSubject.next(res);
   };
 }
 
@@ -45,8 +61,13 @@ const send = (body = '', options = {}) => {
 }
 
 const epic = (req$) =>
-  req$.filter(req => req.methd === 'GET' && req.pathname === '/test')
-    .map(req => send('Made it', { status: 200, headers: { 'Content-Type': 'text/html' }}));
+  req$
+    .do((req) => debug(`${req.method} ${req.url}`))
+    .map(() => send('hey there', { status: 200, headers: {} }))
 
 
-http.createServer(createApp(epic));
+const server = http.createServer(createApp(epic));
+
+server.listen(1111, () => {
+  console.log('Listening at localhost:1111...');
+});
